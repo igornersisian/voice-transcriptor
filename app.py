@@ -212,93 +212,76 @@ class App:
         def _worker():
             try:
                 import pyperclip
-                pyperclip.copy(text)
-                time.sleep(0.05)
 
                 hwnd = self._focused_hwnd
                 control = self._focused_control
+                logger.info("PASTE START: hwnd=%s control=%s text=%d chars",
+                            hwnd, control, len(text))
 
-                if not hwnd or not user32.IsWindow(hwnd):
-                    logger.warning("Target window gone, skipping paste")
+                # Step 1: clipboard
+                pyperclip.copy(text)
+                verify = pyperclip.paste()
+                logger.info("PASTE [1/4] clipboard set, verified=%s", verify[:30] if verify else "EMPTY")
+
+                if not hwnd:
+                    logger.error("PASTE ABORT: no target hwnd")
                     return
 
+                if not user32.IsWindow(hwnd):
+                    logger.error("PASTE ABORT: hwnd %s no longer valid", hwnd)
+                    return
+
+                # Step 2: bring window to foreground
+                fg_before = user32.GetForegroundWindow()
+                logger.info("PASTE [2/4] foreground before=%s, target=%s", fg_before, hwnd)
+
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                result = user32.SetForegroundWindow(hwnd)
+                logger.info("PASTE [2/4] SetForegroundWindow returned %s", result)
+                time.sleep(0.2)
+
+                fg_after = user32.GetForegroundWindow()
+                logger.info("PASTE [2/4] foreground after=%s (match=%s)",
+                            fg_after, fg_after == hwnd)
+
+                # Step 3: set focus to control
                 our_tid = kernel32.GetCurrentThreadId()
                 target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+                logger.info("PASTE [3/4] our_tid=%s target_tid=%s", our_tid, target_tid)
 
-                # Disable foreground lock timeout so SetForegroundWindow works
-                SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
-                user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, 0)
-
-                # Bring target window to front
-                user32.SetForegroundWindow(hwnd)
-                time.sleep(0.15)
-
-                # Attach threads and set focus to specific control
                 attached = False
                 if target_tid and target_tid != our_tid:
-                    user32.AttachThreadInput(our_tid, target_tid, True)
-                    attached = True
+                    att = user32.AttachThreadInput(our_tid, target_tid, True)
+                    attached = att != 0
+                    logger.info("PASTE [3/4] AttachThreadInput=%s", att)
 
-                if control and user32.IsWindow(control):
+                if control and control != hwnd and user32.IsWindow(control):
                     user32.SetFocus(control)
+                    logger.info("PASTE [3/4] SetFocus to control %s", control)
 
                 time.sleep(0.1)
 
-                # Send Ctrl+V via SendInput (much more reliable than pyautogui)
-                self._send_ctrl_v()
+                # Step 4: send Ctrl+V via keybd_event
+                VK_CONTROL = 0x11
+                VK_V = 0x56
+                KEYEVENTF_KEYUP = 0x0002
+
+                user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                user32.keybd_event(VK_V, 0, 0, 0)
+                time.sleep(0.05)
+                user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                logger.info("PASTE [4/4] keybd_event Ctrl+V sent")
 
                 if attached:
                     user32.AttachThreadInput(our_tid, target_tid, False)
 
-                logger.info("Pasted to HWND=%s control=%s", hwnd, control)
+                logger.info("PASTE DONE")
 
             except Exception as e:
-                logger.error("Paste failed: %s", e)
+                logger.exception("PASTE FAILED: %s", e)
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    @staticmethod
-    def _send_ctrl_v() -> None:
-        """Send Ctrl+V using Win32 SendInput — works from any thread."""
-        import ctypes
-        import ctypes.wintypes
-
-        INPUT_KEYBOARD = 1
-        KEYEVENTF_KEYUP = 0x0002
-        VK_CONTROL = 0x11
-        VK_V = 0x56
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", ctypes.wintypes.WORD),
-                ("wScan", ctypes.wintypes.WORD),
-                ("dwFlags", ctypes.wintypes.DWORD),
-                ("time", ctypes.wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT(ctypes.Structure):
-            class _INPUT(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-            _fields_ = [
-                ("type", ctypes.wintypes.DWORD),
-                ("_input", _INPUT),
-            ]
-
-        def make_key(vk, flags=0):
-            inp = INPUT()
-            inp.type = INPUT_KEYBOARD
-            inp._input.ki.wVk = vk
-            inp._input.ki.dwFlags = flags
-            return inp
-
-        inputs = (INPUT * 4)(
-            make_key(VK_CONTROL),           # Ctrl down
-            make_key(VK_V),                 # V down
-            make_key(VK_V, KEYEVENTF_KEYUP),      # V up
-            make_key(VK_CONTROL, KEYEVENTF_KEYUP), # Ctrl up
-        )
-        ctypes.windll.user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
