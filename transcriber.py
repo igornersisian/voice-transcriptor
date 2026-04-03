@@ -76,7 +76,6 @@ class Transcriber:
                             progress_callback("Uploading...")
 
                     config = aai.TranscriptionConfig(
-                        speech_model=aai.SpeechModel.best,
                         language_detection=True,
                     )
                     transcriber = aai.Transcriber()
