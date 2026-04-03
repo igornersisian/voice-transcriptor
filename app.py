@@ -373,17 +373,6 @@ class App:
 
     # ── Paste ─────────────────────────────────────────────────────────────────
 
-    def _paste_text(self, text: str) -> None:
-        import pyperclip
-        import pyautogui
-
-        pyperclip.copy(text)
-        time.sleep(0.05)
-
-        self._restore_focus()
-        pyautogui.hotkey("ctrl", "v")
-        logger.info("Pasted text to HWND=%s, control=%s", self._focused_hwnd, self._focused_control)
-
     # ── Error / idle ──────────────────────────────────────────────────────────
 
     def _show_error(self, msg: str) -> None:
