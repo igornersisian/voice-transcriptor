@@ -365,7 +365,7 @@ class App:
         # Save to history
         self._history.add(text, language=result.language_code)
 
-        self._paste_text(text)
+        self._restore_focus_and_paste(text)
         self._state = AppState.SHOWING_RESULT
         self._widget.show_success(text)
         self._set_tray_icon(ICON_IDLE)
