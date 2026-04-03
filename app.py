@@ -206,47 +206,99 @@ class App:
 
         logger.info("Captured HWND=%s, control=%s", self._focused_hwnd, self._focused_control)
 
-    def _restore_focus(self) -> None:
-        """Restore focus to the exact control that was active when recording started."""
-        hwnd = self._focused_hwnd
-        control = self._focused_control
+    def _restore_focus_and_paste(self, text: str) -> None:
+        """Restore focus and paste in a worker thread using pure Win32 API."""
 
-        if not hwnd:
-            return
+        def _worker():
+            try:
+                import pyperclip
+                pyperclip.copy(text)
+                time.sleep(0.05)
 
-        try:
-            # Check window still exists
-            if not user32.IsWindow(hwnd):
-                logger.warning("Target window no longer exists")
-                return
+                hwnd = self._focused_hwnd
+                control = self._focused_control
 
-            our_tid = kernel32.GetCurrentThreadId()
-            target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+                if not hwnd or not user32.IsWindow(hwnd):
+                    logger.warning("Target window gone, skipping paste")
+                    return
 
-            # Alt-key trick: allows SetForegroundWindow from background process.
-            # Windows blocks SetForegroundWindow unless the calling process
-            # recently received input — a synthetic Alt press satisfies this.
-            KEYEVENTF_KEYUP = 0x0002
-            user32.keybd_event(0x12, 0, 0, 0)       # Alt down
-            user32.keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0)  # Alt up
+                our_tid = kernel32.GetCurrentThreadId()
+                target_tid = user32.GetWindowThreadProcessId(hwnd, None)
 
-            user32.SetForegroundWindow(hwnd)
-            user32.BringWindowToTop(hwnd)
-            time.sleep(0.1)
+                # Disable foreground lock timeout so SetForegroundWindow works
+                SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+                user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, 0)
 
-            # Now attach and set focus to the specific control
-            if control and user32.IsWindow(control):
+                # Bring target window to front
+                user32.SetForegroundWindow(hwnd)
+                time.sleep(0.15)
+
+                # Attach threads and set focus to specific control
                 attached = False
                 if target_tid and target_tid != our_tid:
                     user32.AttachThreadInput(our_tid, target_tid, True)
                     attached = True
-                user32.SetFocus(control)
+
+                if control and user32.IsWindow(control):
+                    user32.SetFocus(control)
+
+                time.sleep(0.1)
+
+                # Send Ctrl+V via SendInput (much more reliable than pyautogui)
+                self._send_ctrl_v()
+
                 if attached:
                     user32.AttachThreadInput(our_tid, target_tid, False)
 
-            time.sleep(0.1)
-        except Exception as e:
-            logger.warning("Failed to restore focus: %s", e)
+                logger.info("Pasted to HWND=%s control=%s", hwnd, control)
+
+            except Exception as e:
+                logger.error("Paste failed: %s", e)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _send_ctrl_v() -> None:
+        """Send Ctrl+V using Win32 SendInput — works from any thread."""
+        import ctypes
+        import ctypes.wintypes
+
+        INPUT_KEYBOARD = 1
+        KEYEVENTF_KEYUP = 0x0002
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", ctypes.wintypes.WORD),
+                ("wScan", ctypes.wintypes.WORD),
+                ("dwFlags", ctypes.wintypes.DWORD),
+                ("time", ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class INPUT(ctypes.Structure):
+            class _INPUT(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+            _fields_ = [
+                ("type", ctypes.wintypes.DWORD),
+                ("_input", _INPUT),
+            ]
+
+        def make_key(vk, flags=0):
+            inp = INPUT()
+            inp.type = INPUT_KEYBOARD
+            inp._input.ki.wVk = vk
+            inp._input.ki.dwFlags = flags
+            return inp
+
+        inputs = (INPUT * 4)(
+            make_key(VK_CONTROL),           # Ctrl down
+            make_key(VK_V),                 # V down
+            make_key(VK_V, KEYEVENTF_KEYUP),      # V up
+            make_key(VK_CONTROL, KEYEVENTF_KEYUP), # Ctrl up
+        )
+        ctypes.windll.user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
