@@ -235,7 +235,6 @@ class App:
                 fg_before = user32.GetForegroundWindow()
                 logger.info("PASTE [2/4] foreground before=%s, target=%s", fg_before, hwnd)
 
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 result = user32.SetForegroundWindow(hwnd)
                 logger.info("PASTE [2/4] SetForegroundWindow returned %s", result)
                 time.sleep(0.2)
