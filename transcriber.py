@@ -77,8 +77,7 @@ class Transcriber:
 
                     config = aai.TranscriptionConfig(
                         speech_models=[
-                            aai.SpeechModel.conformer_2,  # Universal-3 Pro
-                            aai.SpeechModel.nano,         # Universal-2 fallback
+                            aai.SpeechModel.best,  # Universal-3 Pro + auto fallback
                         ],
                         language_detection=True,
                     )
