@@ -75,7 +75,13 @@ class Transcriber:
                         else:
                             progress_callback("Uploading...")
 
-                    config = aai.TranscriptionConfig(language_detection=True)
+                    config = aai.TranscriptionConfig(
+                        speech_models=[
+                            aai.SpeechModel.conformer_2,  # Universal-3 Pro
+                            aai.SpeechModel.nano,         # Universal-2 fallback
+                        ],
+                        language_detection=True,
+                    )
                     transcriber = aai.Transcriber()
                     transcript = transcriber.transcribe(wav_path, config=config)
 
