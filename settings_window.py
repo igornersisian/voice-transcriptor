@@ -127,6 +127,13 @@ class SettingsWindow:
             command=self._close,
         ).pack(side="right")
 
+        # ── Version ─────────────────────────────────────────────────────────
+        from main import APP_VERSION
+        ctk.CTkLabel(
+            win, text=f"v{APP_VERSION}",
+            text_color="#555555", font=ctk.CTkFont(size=10),
+        ).pack(side="bottom", anchor="e", padx=16, pady=(0, 8))
+
         win.after(100, win.lift)
 
     def _start_validate(self) -> None:

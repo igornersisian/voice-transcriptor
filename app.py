@@ -151,7 +151,7 @@ class App:
     def _handle_event(self, event: str, payload) -> None:
         logger.debug("Event: %s  state: %s", event, self._state)
         if event == "hotkey":
-            self._handle_hotkey()
+            self._handle_hotkey(captured_hwnd=payload or 0)
         elif event == "transcription_done":
             self._on_transcription_done(payload)
         elif event == "transcription_progress":
@@ -166,22 +166,27 @@ class App:
     # ── Hotkey handler ────────────────────────────────────────────────────────
 
     def _on_hotkey_press(self) -> None:
-        self._dispatch("hotkey")
+        """Called from keyboard listener thread — capture HWND immediately."""
+        # Capture the foreground window RIGHT NOW, before any queue delay.
+        # GetForegroundWindow is thread-safe and works from any thread.
+        hwnd = user32.GetForegroundWindow()
+        self._dispatch("hotkey", hwnd)
 
-    def _handle_hotkey(self) -> None:
+    def _handle_hotkey(self, captured_hwnd: int = 0) -> None:
         if self._state == AppState.IDLE:
             if not self._cfg.has_api_key():
                 self._settings.show()
                 return
-            self._start_recording()
+            self._start_recording(captured_hwnd)
         elif self._state == AppState.RECORDING:
             self._stop_and_process()
 
     # ── Focus capture ─────────────────────────────────────────────────────────
 
-    def _capture_focused_control(self) -> None:
+    def _capture_focused_control(self, hwnd: int = 0) -> None:
         """Save both the foreground window and the specific focused control."""
-        self._focused_hwnd = user32.GetForegroundWindow()
+        # Use the HWND captured at hotkey-press time (no queue delay)
+        self._focused_hwnd = hwnd or user32.GetForegroundWindow()
         self._focused_control = 0
 
         if not self._focused_hwnd:
@@ -210,30 +215,43 @@ class App:
             return
 
         try:
+            # Check window still exists
+            if not user32.IsWindow(hwnd):
+                logger.warning("Target window no longer exists")
+                return
+
             our_tid = kernel32.GetCurrentThreadId()
             target_tid = user32.GetWindowThreadProcessId(hwnd, None)
 
-            attached = False
-            if target_tid and target_tid != our_tid:
-                user32.AttachThreadInput(our_tid, target_tid, True)
-                attached = True
+            # Alt-key trick: allows SetForegroundWindow from background process.
+            # Windows blocks SetForegroundWindow unless the calling process
+            # recently received input — a synthetic Alt press satisfies this.
+            KEYEVENTF_KEYUP = 0x0002
+            user32.keybd_event(0x12, 0, 0, 0)       # Alt down
+            user32.keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0)  # Alt up
 
             user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+            time.sleep(0.1)
 
-            if control:
+            # Now attach and set focus to the specific control
+            if control and user32.IsWindow(control):
+                attached = False
+                if target_tid and target_tid != our_tid:
+                    user32.AttachThreadInput(our_tid, target_tid, True)
+                    attached = True
                 user32.SetFocus(control)
+                if attached:
+                    user32.AttachThreadInput(our_tid, target_tid, False)
 
-            if attached:
-                user32.AttachThreadInput(our_tid, target_tid, False)
-
-            time.sleep(0.12)
+            time.sleep(0.1)
         except Exception as e:
             logger.warning("Failed to restore focus: %s", e)
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
-    def _start_recording(self) -> None:
-        self._capture_focused_control()
+    def _start_recording(self, captured_hwnd: int = 0) -> None:
+        self._capture_focused_control(captured_hwnd)
 
         try:
             self._recorder.start()
