@@ -7,7 +7,7 @@ import logging.handlers
 import ctypes
 from pathlib import Path
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.2.0"
 
 ERROR_ALREADY_EXISTS = 183
 _MUTEX_HANDLE = None  # keep alive for process lifetime
