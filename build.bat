@@ -21,7 +21,6 @@ pyinstaller ^
   --hidden-import pyaudio ^
   --hidden-import keyboard ^
   --hidden-import pyperclip ^
-  --hidden-import pyautogui ^
   --hidden-import PIL._tkinter_finder ^
   --hidden-import pystray._win32 ^
   --add-data "assets;assets" ^
