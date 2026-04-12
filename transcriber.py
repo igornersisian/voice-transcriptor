@@ -160,7 +160,7 @@ class Transcriber:
 
 
 class RealtimeSession:
-    """Wraps AssemblyAI RealtimeTranscriber for streaming transcription."""
+    """Wraps AssemblyAI V3 StreamingClient for live transcription."""
 
     def __init__(
         self,
@@ -173,41 +173,58 @@ class RealtimeSession:
         self._on_text = on_text
         self._on_error = on_error
         self._sample_rate = sample_rate
-        self._rt: Optional[aai.RealtimeTranscriber] = None
+        self._client: Optional[StreamingClient] = None
         self._finals: list[str] = []
         self._current_partial: str = ""
         self._lock = threading.Lock()
         self._connected = False
 
     def start(self) -> None:
-        """Connect to AssemblyAI realtime endpoint."""
-        aai.settings.api_key = self._api_key
-        self._rt = aai.RealtimeTranscriber(
-            sample_rate=self._sample_rate,
-            on_data=self._on_data,
-            on_error=self._on_rt_error,
-            on_open=self._on_open,
-            on_close=self._on_close,
+        """Connect to AssemblyAI V3 streaming endpoint."""
+        from assemblyai.streaming.v3.client import StreamingClient
+        from assemblyai.streaming.v3.models import (
+            StreamingClientOptions,
+            StreamingParameters,
+            StreamingEvents,
+            SpeechModel,
+            Encoding,
         )
-        self._rt.connect()
-        logger.info("Realtime transcription session started")
+
+        options = StreamingClientOptions(
+            api_key=self._api_key,
+        )
+        self._client = StreamingClient(options)
+
+        # Register event handlers
+        self._client.on(StreamingEvents.Begin, self._on_begin)
+        self._client.on(StreamingEvents.Turn, self._on_turn)
+        self._client.on(StreamingEvents.Error, self._on_stream_error)
+        self._client.on(StreamingEvents.Termination, self._on_termination)
+
+        params = StreamingParameters(
+            sample_rate=self._sample_rate,
+            speech_model=SpeechModel.universal_streaming_multilingual,
+            encoding=Encoding.pcm_s16le,
+        )
+        self._client.connect(params)
+        logger.info("V3 streaming session started")
 
     def send_audio(self, chunk: bytes) -> None:
         """Stream raw PCM audio bytes."""
-        if self._rt and self._connected:
+        if self._client and self._connected:
             try:
-                self._rt.stream(chunk)
+                self._client.stream(chunk)
             except Exception as e:
-                logger.debug("Realtime stream error: %s", e)
+                logger.debug("Streaming send error: %s", e)
 
     def stop(self) -> str:
-        """Close session and return accumulated text."""
-        if self._rt:
+        """Disconnect and return accumulated text."""
+        if self._client:
             try:
-                self._rt.close()
+                self._client.disconnect(terminate=True)
             except Exception as e:
-                logger.debug("Realtime close error: %s", e)
-            self._rt = None
+                logger.debug("Streaming disconnect error: %s", e)
+            self._client = None
         self._connected = False
 
         with self._lock:
@@ -224,16 +241,22 @@ class RealtimeSession:
                 parts.append(self._current_partial)
             return " ".join(parts).strip()
 
-    def _on_data(self, transcript: aai.RealtimeTranscript) -> None:
-        if not transcript.text:
+    def _on_begin(self, client, event) -> None:
+        self._connected = True
+        logger.info("Streaming session opened: %s", event.id)
+
+    def _on_turn(self, client, event) -> None:
+        text = event.transcript
+        if not text:
             return
+
         with self._lock:
-            if isinstance(transcript, aai.RealtimeFinalTranscript):
-                self._finals.append(transcript.text)
+            if event.end_of_turn:
+                self._finals.append(text)
                 self._current_partial = ""
                 is_final = True
             else:
-                self._current_partial = transcript.text
+                self._current_partial = text
                 is_final = False
 
         full_text = self.get_current_text()
@@ -243,18 +266,14 @@ class RealtimeSession:
             except Exception:
                 pass
 
-    def _on_rt_error(self, error: aai.RealtimeError) -> None:
-        logger.error("Realtime transcription error: %s", error)
+    def _on_stream_error(self, client, error) -> None:
+        logger.error("Streaming error: %s", error)
         if self._on_error:
             try:
                 self._on_error(str(error))
             except Exception:
                 pass
 
-    def _on_open(self, session_opened: aai.RealtimeSessionOpened) -> None:
-        self._connected = True
-        logger.info("Realtime session opened: %s", session_opened.session_id)
-
-    def _on_close(self) -> None:
+    def _on_termination(self, client, event) -> None:
         self._connected = False
-        logger.info("Realtime session closed")
+        logger.info("Streaming session terminated")
