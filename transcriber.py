@@ -1,4 +1,4 @@
-"""AssemblyAI batch transcription with auto language detection and retry."""
+"""AssemblyAI batch and real-time transcription."""
 
 import assemblyai as aai
 import logging
@@ -144,3 +144,116 @@ class Transcriber:
         except Exception as e:
             aai.settings.api_key = self._api_key
             return False, f"Connection error: {e}"
+
+    def create_realtime_session(
+        self,
+        on_text: Optional[Callable[[str, bool], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        sample_rate: int = 16000,
+    ) -> "RealtimeSession":
+        return RealtimeSession(
+            api_key=self._api_key,
+            on_text=on_text,
+            on_error=on_error,
+            sample_rate=sample_rate,
+        )
+
+
+class RealtimeSession:
+    """Wraps AssemblyAI RealtimeTranscriber for streaming transcription."""
+
+    def __init__(
+        self,
+        api_key: str,
+        on_text: Optional[Callable[[str, bool], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        sample_rate: int = 16000,
+    ) -> None:
+        self._api_key = api_key
+        self._on_text = on_text
+        self._on_error = on_error
+        self._sample_rate = sample_rate
+        self._rt: Optional[aai.RealtimeTranscriber] = None
+        self._finals: list[str] = []
+        self._current_partial: str = ""
+        self._lock = threading.Lock()
+        self._connected = False
+
+    def start(self) -> None:
+        """Connect to AssemblyAI realtime endpoint."""
+        self._rt = aai.RealtimeTranscriber(
+            sample_rate=self._sample_rate,
+            on_data=self._on_data,
+            on_error=self._on_rt_error,
+            on_open=self._on_open,
+            on_close=self._on_close,
+        )
+        self._rt.connect()
+        logger.info("Realtime transcription session started")
+
+    def send_audio(self, chunk: bytes) -> None:
+        """Stream raw PCM audio bytes."""
+        if self._rt and self._connected:
+            try:
+                self._rt.stream(chunk)
+            except Exception as e:
+                logger.debug("Realtime stream error: %s", e)
+
+    def stop(self) -> str:
+        """Close session and return accumulated text."""
+        if self._rt:
+            try:
+                self._rt.close()
+            except Exception as e:
+                logger.debug("Realtime close error: %s", e)
+            self._rt = None
+        self._connected = False
+
+        with self._lock:
+            parts = list(self._finals)
+            if self._current_partial:
+                parts.append(self._current_partial)
+            return " ".join(parts).strip()
+
+    def get_current_text(self) -> str:
+        """Get the current accumulated text (finals + partial)."""
+        with self._lock:
+            parts = list(self._finals)
+            if self._current_partial:
+                parts.append(self._current_partial)
+            return " ".join(parts).strip()
+
+    def _on_data(self, transcript: aai.RealtimeTranscript) -> None:
+        if not transcript.text:
+            return
+        with self._lock:
+            if isinstance(transcript, aai.RealtimeFinalTranscript):
+                self._finals.append(transcript.text)
+                self._current_partial = ""
+                is_final = True
+            else:
+                self._current_partial = transcript.text
+                is_final = False
+
+        full_text = self.get_current_text()
+        if self._on_text:
+            try:
+                self._on_text(full_text, is_final)
+            except Exception:
+                pass
+
+    def _on_rt_error(self, error: aai.RealtimeError) -> None:
+        logger.error("Realtime transcription error: %s", error)
+        if self._on_error:
+            try:
+                self._on_error(str(error))
+            except Exception:
+                pass
+
+    def _on_open(self, session_opened: aai.RealtimeSessionOpened) -> None:
+        self._connected = True
+        logger.info("Realtime session opened: %s", session_opened.session_id)
+
+    def _on_close(self) -> None:
+        self._connected = False
+        logger.info("Realtime session closed")

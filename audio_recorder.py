@@ -29,12 +29,14 @@ class AudioRecorder:
         min_duration: float = 0.5,
         silence_threshold: int = 150,
         level_callback: Optional[Callable[[float], None]] = None,
+        chunk_callback: Optional[Callable[[bytes], None]] = None,
     ) -> None:
         self._tmp_dir = tmp_dir
         self._device_index = device_index
         self._min_duration = min_duration
         self._silence_threshold = silence_threshold
         self._level_callback = level_callback
+        self._chunk_callback = chunk_callback
 
         self._pa: Optional[pyaudio.PyAudio] = None
         self._stream = None
@@ -168,6 +170,12 @@ class AudioRecorder:
                 break
 
             self._wav_file.writeframes(chunk)
+
+            if self._chunk_callback:
+                try:
+                    self._chunk_callback(chunk)
+                except Exception:
+                    pass
 
             rms = self._compute_rms(chunk)
             with self._lock:

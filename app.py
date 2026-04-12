@@ -10,6 +10,7 @@ import os
 import logging
 import ctypes
 import ctypes.wintypes
+import keyboard
 from enum import Enum, auto
 from typing import Optional
 from pathlib import Path
@@ -20,7 +21,7 @@ from config_manager import ConfigManager, CONFIG_DIR, TMP_DIR
 from startup_manager import StartupManager
 from hotkey_manager import HotkeyManager
 from audio_recorder import AudioRecorder
-from transcriber import Transcriber
+from transcriber import Transcriber, RealtimeSession
 from recording_widget import RecordingWidget
 from settings_window import SettingsWindow
 from history import HistoryManager
@@ -64,6 +65,8 @@ class App:
         self._focused_control: int = 0
         self._current_wav_path: Optional[str] = None
         self._tray: Optional[pystray.Icon] = None
+        self._rt_session: Optional[RealtimeSession] = None
+        self._esc_hook = None
 
         # Components
         self._cfg = ConfigManager()
@@ -81,6 +84,7 @@ class App:
             min_duration=self._cfg.get("min_recording_seconds"),
             silence_threshold=self._cfg.get("silence_rms_threshold"),
             level_callback=self._on_audio_level,
+            chunk_callback=self._on_audio_chunk,
         )
 
         self._transcriber = Transcriber(api_key=self._cfg.get("api_key"))
@@ -152,8 +156,12 @@ class App:
         logger.debug("Event: %s  state: %s", event, self._state)
         if event == "hotkey":
             self._handle_hotkey(captured_hwnd=payload or 0)
+        elif event == "stop_recording":
+            self._handle_stop_recording()
         elif event == "transcription_done":
             self._on_transcription_done(payload)
+        elif event == "live_text":
+            self._widget.update_live_text(payload or "")
         elif event == "transcription_progress":
             pass
         elif event == "open_settings":
@@ -179,6 +187,11 @@ class App:
                 return
             self._start_recording(captured_hwnd)
         elif self._state == AppState.RECORDING:
+            self._stop_and_process()
+
+    def _handle_stop_recording(self) -> None:
+        """Handle ESC key stop — same as hotkey during recording."""
+        if self._state == AppState.RECORDING:
             self._stop_and_process()
 
     # ── Focus capture ─────────────────────────────────────────────────────────
@@ -287,12 +300,32 @@ class App:
     def _start_recording(self, captured_hwnd: int = 0) -> None:
         self._capture_focused_control(captured_hwnd)
 
+        # Start real-time transcription session
+        try:
+            self._rt_session = self._transcriber.create_realtime_session(
+                on_text=self._on_live_text,
+                on_error=self._on_rt_error,
+            )
+            self._rt_session.start()
+        except Exception as e:
+            logger.warning("Failed to start realtime transcription: %s", e)
+            self._rt_session = None
+
         try:
             self._recorder.start()
         except Exception as e:
             logger.error("Failed to start recording: %s", e)
+            if self._rt_session:
+                self._rt_session.stop()
+                self._rt_session = None
             self._show_error(f"Microphone: {e}")
             return
+
+        # Register ESC to stop recording
+        try:
+            self._esc_hook = keyboard.on_press_key("esc", self._on_esc_press, suppress=False)
+        except Exception as e:
+            logger.warning("Failed to register ESC key: %s", e)
 
         self._state = AppState.RECORDING
         self._widget.set_hotkey_label(self._cfg.get("hotkey"))
@@ -301,20 +334,79 @@ class App:
         logger.info("-> RECORDING")
 
     def _stop_and_process(self) -> None:
-        self._state = AppState.PROCESSING
-        self._widget.show_processing()
-        self._set_tray_icon(ICON_PROCESSING)
-        logger.info("-> PROCESSING")
+        # Unregister ESC
+        if self._esc_hook:
+            try:
+                keyboard.unhook(self._esc_hook)
+            except Exception:
+                pass
+            self._esc_hook = None
+
+        # Get realtime text before stopping
+        rt_text = ""
+        if self._rt_session:
+            try:
+                rt_text = self._rt_session.stop()
+            except Exception as e:
+                logger.warning("Realtime session stop error: %s", e)
+            self._rt_session = None
 
         wav_path = self._recorder.stop()
 
         if wav_path is None:
+            if rt_text:
+                # Recording was "too short" but we got realtime text — use it
+                logger.info("Recording short/silent but got realtime text: %d chars", len(rt_text))
+                self._finish_with_text(rt_text)
+                return
             self._show_error("Recording too short or silent")
             return
 
-        self._current_wav_path = wav_path
-        t = threading.Thread(target=self._transcribe_worker, args=(wav_path,), daemon=True)
-        t.start()
+        if rt_text:
+            # We already have realtime text — use it directly, skip batch API
+            logger.info("Using realtime text (%d chars), skipping batch transcription", len(rt_text))
+            try:
+                os.unlink(wav_path)
+            except Exception:
+                pass
+            self._finish_with_text(rt_text)
+        else:
+            # Realtime failed — fall back to batch transcription
+            logger.info("No realtime text, falling back to batch transcription")
+            self._state = AppState.PROCESSING
+            self._widget.show_processing()
+            self._set_tray_icon(ICON_PROCESSING)
+            logger.info("-> PROCESSING")
+            self._current_wav_path = wav_path
+            t = threading.Thread(target=self._transcribe_worker, args=(wav_path,), daemon=True)
+            t.start()
+
+    def _finish_with_text(self, text: str) -> None:
+        """Finish recording with already-transcribed text (from realtime)."""
+        logger.info("Transcription OK (%d chars) via realtime", len(text))
+        self._history.add(text, language=None)
+        self._restore_focus_and_paste(text)
+        self._state = AppState.SHOWING_RESULT
+        self._widget.show_success(text)
+        self._set_tray_icon(ICON_IDLE)
+        self._widget.get_tk_root().after(2500, self._return_to_idle)
+
+    def _on_esc_press(self, event) -> None:
+        """Called from keyboard listener thread when ESC is pressed."""
+        self._dispatch("stop_recording")
+
+    def _on_live_text(self, text: str, is_final: bool) -> None:
+        """Called from realtime transcription thread with updated text."""
+        self._dispatch("live_text", text)
+
+    def _on_rt_error(self, error: str) -> None:
+        """Called from realtime transcription thread on error."""
+        logger.warning("Realtime transcription error: %s", error)
+
+    def _on_audio_chunk(self, chunk: bytes) -> None:
+        """Called from recorder thread — forward audio to realtime session."""
+        if self._rt_session:
+            self._rt_session.send_audio(chunk)
 
     # ── Transcription worker ──────────────────────────────────────────────────
 
@@ -409,6 +501,18 @@ class App:
     def _quit(self) -> None:
         logger.info("Quitting...")
         self._hotkey.unregister()
+        if self._esc_hook:
+            try:
+                keyboard.unhook(self._esc_hook)
+            except Exception:
+                pass
+            self._esc_hook = None
+        if self._rt_session:
+            try:
+                self._rt_session.stop()
+            except Exception:
+                pass
+            self._rt_session = None
         if self._state == AppState.RECORDING:
             try:
                 self._recorder.stop()

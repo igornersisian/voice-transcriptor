@@ -19,8 +19,9 @@ WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 
 # Dimensions
-WIDGET_WIDTH = 340
-WIDGET_HEIGHT = 60
+WIDGET_WIDTH = 380
+WIDGET_HEIGHT_SMALL = 60
+WIDGET_HEIGHT_LARGE = 110
 CORNER_RADIUS = 30
 
 # Colors
@@ -53,6 +54,8 @@ class RecordingWidget:
         self._spinner_angle = 0
         self._hotkey_label = "ctrl+alt+space"  # updated dynamically
         self._canvas: Optional[tk.Canvas] = None
+        self._current_height = WIDGET_HEIGHT_SMALL
+        self._live_text = ""
         self._build_window()
         self._build_canvas()
         self._apply_no_activate()
@@ -67,13 +70,13 @@ class RecordingWidget:
         root.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
         sw = root.winfo_screenwidth()
         x = (sw - WIDGET_WIDTH) // 2
-        root.geometry(f"{WIDGET_WIDTH}x{WIDGET_HEIGHT}+{x}+12")
+        root.geometry(f"{WIDGET_WIDTH}x{WIDGET_HEIGHT_SMALL}+{x}+12")
 
     def _build_canvas(self) -> None:
         c = tk.Canvas(
             self._root,
             width=WIDGET_WIDTH,
-            height=WIDGET_HEIGHT,
+            height=WIDGET_HEIGHT_SMALL,
             bg=TRANSPARENT_KEY,
             highlightthickness=0,
             bd=0,
@@ -93,10 +96,20 @@ class RecordingWidget:
         except Exception as e:
             logger.warning("Could not apply WS_EX_NOACTIVATE: %s", e)
 
+    def _resize(self, new_height: int) -> None:
+        """Resize widget and canvas to a new height."""
+        if new_height == self._current_height:
+            return
+        self._current_height = new_height
+        sw = self._root.winfo_screenwidth()
+        x = (sw - WIDGET_WIDTH) // 2
+        self._root.geometry(f"{WIDGET_WIDTH}x{new_height}+{x}+12")
+        self._canvas.config(height=new_height)
+
     def _draw_pill(self, fill: str) -> None:
         c = self._canvas
         r = CORNER_RADIUS
-        w, h = WIDGET_WIDTH, WIDGET_HEIGHT
+        w, h = WIDGET_WIDTH, self._current_height
         c.delete("pill")
         c.create_arc(0, 0, 2*r, 2*r, start=90, extent=90, fill=fill, outline=fill, tags="pill")
         c.create_arc(w-2*r, 0, w, 2*r, start=0, extent=90, fill=fill, outline=fill, tags="pill")
@@ -134,6 +147,9 @@ class RecordingWidget:
     def update_audio_level(self, level: float) -> None:
         self._level_deque.append(level)
 
+    def update_live_text(self, text: str) -> None:
+        self._live_text = text
+
     def run_mainloop(self) -> None:
         self._root.mainloop()
 
@@ -160,6 +176,8 @@ class RecordingWidget:
     def _start_recording_anim(self, gen: int) -> None:
         if gen != self._gen:
             return
+        self._live_text = ""
+        self._resize(WIDGET_HEIGHT_SMALL)
         self._root.deiconify()
         self._canvas.delete("all")
         self._draw_pill(BG_COLOR)
@@ -172,22 +190,33 @@ class RecordingWidget:
     def _render_recording(self) -> None:
         c = self._canvas
         c.delete("content")
-        dot_x, dot_y = 28, WIDGET_HEIGHT // 2
+
+        # Check if we need to expand for live text
+        need_large = bool(self._live_text)
+        target_h = WIDGET_HEIGHT_LARGE if need_large else WIDGET_HEIGHT_SMALL
+        if target_h != self._current_height:
+            self._resize(target_h)
+            self._canvas.delete("all")
+            self._draw_pill(BG_COLOR)
+
+        header_y = 22 if need_large else self._current_height // 2
+
+        dot_x = 28
         dot_r = 7
         dot_color = DOT_RED if self._dot_on else DOT_RED_DIM
         c.create_oval(
-            dot_x - dot_r, dot_y - dot_r,
-            dot_x + dot_r, dot_y + dot_r,
+            dot_x - dot_r, header_y - dot_r,
+            dot_x + dot_r, header_y + dot_r,
             fill=dot_color, outline="", tags="content"
         )
         c.create_text(
-            46, dot_y - 7, anchor="w",
+            46, header_y - 7, anchor="w",
             text="Recording", fill=TEXT_COLOR,
             font=("Segoe UI", 11, "bold"), tags="content"
         )
-        hint = f"Press {self._hotkey_label} to stop"
+        hint = f"ESC or {self._hotkey_label} to stop"
         c.create_text(
-            46, dot_y + 7, anchor="w",
+            46, header_y + 7, anchor="w",
             text=hint, fill=TEXT_MUTED,
             font=("Segoe UI", 8), tags="content"
         )
@@ -195,10 +224,24 @@ class RecordingWidget:
         for i, level in enumerate(self._bar_levels):
             bh = max(BAR_MIN_H, int(level * BAR_MAX_H))
             x0 = bar_start_x + i * (BAR_WIDTH + BAR_GAP)
-            y0 = WIDGET_HEIGHT // 2 + BAR_MAX_H // 2 - bh
-            y1 = WIDGET_HEIGHT // 2 + BAR_MAX_H // 2
+            y0 = header_y + BAR_MAX_H // 2 - bh
+            y1 = header_y + BAR_MAX_H // 2
             color = BAR_COLOR_HOT if level > 0.7 else BAR_COLOR
             c.create_rectangle(x0, y0, x0 + BAR_WIDTH, y1, fill=color, outline="", tags="content")
+
+        # Live transcription text
+        if self._live_text:
+            # Truncate to fit widget width
+            display = self._live_text
+            if len(display) > 90:
+                display = "\u2026" + display[-90:]
+            text_y = 58
+            max_w = WIDGET_WIDTH - 40
+            c.create_text(
+                20, text_y, anchor="nw",
+                text=display, fill=TEXT_COLOR,
+                font=("Segoe UI", 9), width=max_w, tags="content"
+            )
 
     def _pulse_dot(self, gen: int) -> None:
         if gen != self._gen:
@@ -225,6 +268,7 @@ class RecordingWidget:
     def _start_processing_anim(self, gen: int) -> None:
         if gen != self._gen:
             return
+        self._resize(WIDGET_HEIGHT_SMALL)
         self._root.deiconify()
         self._canvas.delete("all")
         self._draw_pill(BG_COLOR)
@@ -236,7 +280,7 @@ class RecordingWidget:
             return
         c = self._canvas
         c.delete("content")
-        cx, cy, r = 28, WIDGET_HEIGHT // 2, 10
+        cx, cy, r = 28, self._current_height // 2, 10
         start = self._spinner_angle
         c.create_arc(
             cx - r, cy - r, cx + r, cy + r,
@@ -263,13 +307,14 @@ class RecordingWidget:
     def _render_result(self, text: str, success: bool, gen: int) -> None:
         if gen != self._gen:
             return
+        self._resize(WIDGET_HEIGHT_SMALL)
         self._root.deiconify()
         c = self._canvas
         c.delete("all")
         self._draw_pill(BG_COLOR)
         icon = "\u2713" if success else "\u2715"
         color = GREEN if success else ERROR_RED
-        cy = WIDGET_HEIGHT // 2
+        cy = self._current_height // 2
         c.create_oval(14, cy - 12, 38, cy + 12, fill=color, outline="")
         c.create_text(26, cy, text=icon, fill="white", font=("Segoe UI", 13, "bold"))
         display = text[:42] + "\u2026" if len(text) > 42 else text

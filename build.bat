@@ -18,6 +18,7 @@ pyinstaller ^
   --collect-all customtkinter ^
   --collect-all pystray ^
   --hidden-import assemblyai ^
+  --hidden-import websockets ^
   --hidden-import pyaudio ^
   --hidden-import keyboard ^
   --hidden-import pyperclip ^
