@@ -156,8 +156,8 @@ class App:
         logger.debug("Event: %s  state: %s", event, self._state)
         if event == "hotkey":
             self._handle_hotkey(captured_hwnd=payload or 0)
-        elif event == "stop_recording":
-            self._handle_stop_recording()
+        elif event == "cancel_recording":
+            self._handle_cancel_recording()
         elif event == "transcription_done":
             self._on_transcription_done(payload)
         elif event == "live_text":
@@ -189,10 +189,41 @@ class App:
         elif self._state == AppState.RECORDING:
             self._stop_and_process()
 
-    def _handle_stop_recording(self) -> None:
-        """Handle ESC key stop — same as hotkey during recording."""
-        if self._state == AppState.RECORDING:
-            self._stop_and_process()
+    def _handle_cancel_recording(self) -> None:
+        """Handle ESC key — cancel recording, discard everything."""
+        if self._state != AppState.RECORDING:
+            return
+
+        logger.info("Recording cancelled by ESC")
+
+        # Unregister ESC
+        if self._esc_hook:
+            try:
+                keyboard.unhook(self._esc_hook)
+            except Exception:
+                pass
+            self._esc_hook = None
+
+        # Kill realtime session without using its text
+        if self._rt_session:
+            try:
+                self._rt_session.stop()
+            except Exception:
+                pass
+            self._rt_session = None
+
+        # Stop recorder and discard the file
+        wav_path = self._recorder.stop()
+        if wav_path:
+            try:
+                os.unlink(wav_path)
+            except Exception:
+                pass
+
+        self._state = AppState.IDLE
+        self._widget.hide()
+        self._set_tray_icon(ICON_IDLE)
+        logger.info("-> IDLE (cancelled)")
 
     # ── Focus capture ─────────────────────────────────────────────────────────
 
@@ -393,7 +424,7 @@ class App:
 
     def _on_esc_press(self, event) -> None:
         """Called from keyboard listener thread when ESC is pressed."""
-        self._dispatch("stop_recording")
+        self._dispatch("cancel_recording")
 
     def _on_live_text(self, text: str, is_final: bool) -> None:
         """Called from realtime transcription thread with updated text."""

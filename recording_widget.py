@@ -214,7 +214,7 @@ class RecordingWidget:
             text="Recording", fill=TEXT_COLOR,
             font=("Segoe UI", 11, "bold"), tags="content"
         )
-        hint = f"ESC or {self._hotkey_label} to stop"
+        hint = f"{self._hotkey_label} — stop · ESC — cancel"
         c.create_text(
             46, header_y + 7, anchor="w",
             text=hint, fill=TEXT_MUTED,

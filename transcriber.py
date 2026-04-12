@@ -181,6 +181,7 @@ class RealtimeSession:
 
     def start(self) -> None:
         """Connect to AssemblyAI realtime endpoint."""
+        aai.settings.api_key = self._api_key
         self._rt = aai.RealtimeTranscriber(
             sample_rate=self._sample_rate,
             on_data=self._on_data,
