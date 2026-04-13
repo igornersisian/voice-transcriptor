@@ -203,7 +203,7 @@ class RealtimeSession:
 
         params = StreamingParameters(
             sample_rate=self._sample_rate,
-            speech_model=SpeechModel.universal_streaming_multilingual,
+            speech_model=SpeechModel.whisper_rt,
             encoding=Encoding.pcm_s16le,
         )
         self._client.connect(params)
@@ -247,6 +247,14 @@ class RealtimeSession:
 
     def _on_turn(self, client, event) -> None:
         text = event.transcript
+        # If transcript is empty, try to build from words
+        if not text and hasattr(event, 'words') and event.words:
+            text = " ".join(w.text for w in event.words if w.text)
+        logger.info(
+            "Turn: order=%s end=%s formatted=%s lang=%s text=%r",
+            event.turn_order, event.end_of_turn, event.turn_is_formatted,
+            getattr(event, 'language_code', None), text[:80] if text else "",
+        )
         if not text:
             return
 
